@@ -8,12 +8,18 @@ MCP_SSE_READ_TIMEOUT_S = 300.0
 
 
 MAX_AGENT_TURNS = 24
+MAX_GUARDRAIL_TURNS = 6
 AGENT_NAME = "SupportAgent"
-TRACE_SPAN_NAME = "chat"
+VERIFICATION_GUARD_NAME = "VerificationGuard"
+FALLBACK_VERIFICATION_AGENT_NAME = "VerificationFallback"
+TRACE_SUPPORT_SPAN = "support_chat"
+TRACE_VERIFICATION_GUARD_SPAN = "verification_guard"
+TRACE_FALLBACK_SPAN = "verification_fallback"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 SESSION_DB_FILENAME = "conversations.sqlite"
+VERIFICATION_DB_FILENAME = "verification.sqlite"
 
 CHAT_MESSAGE_MAX_LEN = 16_000
 

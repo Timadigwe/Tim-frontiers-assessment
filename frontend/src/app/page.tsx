@@ -1,5 +1,6 @@
 "use client";
 
+import { ChatMarkdown } from "@/components/ChatMarkdown";
 import { newSessionId } from "@/lib/sessionId";
 import { useEffect, useRef, useState } from "react";
 
@@ -18,13 +19,17 @@ function getOrCreateSessionId(): string {
   return id;
 }
 
+const OPENING_ASSISTANT =
+  "Hello — I'm your support assistant. I'm here to help with products and orders. First I need to verify your account: please send your email and the PIN on file.";
+
 export default function Page() {
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [messages, setMessages] = useState<Msg[]>([{ role: "assistant", content: OPENING_ASSISTANT }]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** null = still checking; true/false = health result */
   const [serviceActive, setServiceActive] = useState<boolean | null>(null);
+  const [accountVerified, setAccountVerified] = useState(false);
   const [sessionId, setSessionId] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -66,6 +71,9 @@ export default function Page() {
         throw new Error(detail || res.statusText);
       }
       const reply = typeof data?.reply === "string" ? data.reply : "";
+      if (typeof data?.verified === "boolean") {
+        setAccountVerified(data.verified);
+      }
       setMessages((m) => [...m, { role: "assistant", content: reply || "(No reply)" }]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -90,7 +98,8 @@ export default function Page() {
     const id = newSessionId();
     sessionStorage.setItem("support_chat_session_id", id);
     setSessionId(id);
-    setMessages([]);
+    setAccountVerified(false);
+    setMessages([{ role: "assistant", content: OPENING_ASSISTANT }]);
   }
 
   const statusLabel =
@@ -111,6 +120,11 @@ export default function Page() {
           >
             {statusLabel}
           </span>
+          {accountVerified && apiBase && (
+            <span className="pill pill-ok" aria-live="polite">
+              Account verified
+            </span>
+          )}
         </div>
       </header>
 
@@ -119,21 +133,19 @@ export default function Page() {
       )}
 
       <div className="chat-scroll">
-        {messages.length === 0 && apiBase && (
-          <p className="empty-hint">
-            Ask about stock, search products, verify with email + PIN for orders, or start an order.
-          </p>
+        {!messages.some((m) => m.role === "user") && apiBase && (
+          <p className="empty-hint">Reply with your email and PIN to continue, or ask a question after you are verified.</p>
         )}
         {messages.map((msg, i) => (
           <div key={i} className={`bubble ${msg.role === "user" ? "bubble-user" : "bubble-assistant"}`}>
             {msg.role === "assistant" && <div className="bubble-label">Assistant</div>}
-            {msg.content}
+            {msg.role === "assistant" ? <ChatMarkdown content={msg.content} /> : <span className="bubble-text-plain">{msg.content}</span>}
           </div>
         ))}
         {loading && (
           <div className="bubble bubble-assistant">
             <div className="bubble-label">Assistant</div>
-            …
+            <span className="bubble-text-plain">…</span>
           </div>
         )}
         <div ref={bottomRef} />

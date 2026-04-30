@@ -22,21 +22,33 @@ from config import Settings, get_settings
 from constants import (
     AGENT_NAME,
     CHAT_MESSAGE_MAX_LEN,
+    FALLBACK_VERIFICATION_AGENT_NAME,
     MCP_SSE_READ_TIMEOUT_S,
     MCP_TIMEOUT_S,
     MAX_AGENT_TURNS,
+    MAX_GUARDRAIL_TURNS,
     OPENROUTER_BASE_URL,
     SESSION_DB_FILENAME,
     SESSION_ID_MAX_LEN,
     SESSION_ID_MIN_LEN,
-    TRACE_SPAN_NAME,
+    TRACE_FALLBACK_SPAN,
+    TRACE_SUPPORT_SPAN,
+    TRACE_VERIFICATION_GUARD_SPAN,
     UUID_V1_TO_V5_RE,
+    VERIFICATION_DB_FILENAME,
+    VERIFICATION_GUARD_NAME,
 )
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from instructions import SUPPORT_AGENT
+from instructions import (
+    FALLBACK_VERIFICATION_CLASSIFIER,
+    support_instructions_verified,
+    verification_guard_instructions,
+)
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
+from verification_signals import verification_tool_outcome
+from verification_store import VerificationStore
 
 # Safe default: OpenRouter has no OpenAI key unless we set tracing export separately.
 set_tracing_disabled(True)
@@ -66,7 +78,7 @@ def _configure_tracing(st: Settings) -> None:
     else:
         set_tracing_disabled(True)
         log.info(
-            "OpenAI Agents tracing export disabled; set OPENAI_API_KEY to export traces "
+            "OpenAI Agents tracing export disabled; set OPENAI_API_KEY to export traces.",
         )
 
 
@@ -110,11 +122,42 @@ def _session_store_path(st: Settings) -> Path:
     return root / SESSION_DB_FILENAME
 
 
+def _verification_store_path(st: Settings) -> Path:
+    root = Path(st.session_store_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return root / VERIFICATION_DB_FILENAME
+
+
 def _validate_session_id(session_id: str) -> str:
     s = session_id.strip()
     if not UUID_V1_TO_V5_RE.match(s):
         raise HTTPException(status_code=400, detail="session_id must be a UUID")
     return s.lower()
+
+
+async def _fallback_verification_classifier(
+    *,
+    user_message: str,
+    assistant_reply: str,
+    model: OpenAIChatCompletionsModel,
+) -> bool:
+    """Second pass only when MCP tool output is ambiguous. No tools."""
+    agent = Agent(
+        name=FALLBACK_VERIFICATION_AGENT_NAME,
+        instructions=FALLBACK_VERIFICATION_CLASSIFIER,
+        model=model,
+    )
+    payload = (
+        "Evaluate this single turn.\n\n"
+        f"User message:\n{user_message}\n\n"
+        f"Assistant reply:\n{assistant_reply}\n"
+    )
+    with trace(TRACE_FALLBACK_SPAN):
+        result = await Runner.run(agent, input=payload, max_turns=MAX_GUARDRAIL_TURNS)
+    raw = result.final_output
+    text = "" if raw is None else str(raw).strip().upper()
+    token = text.split()[0] if text else ""
+    return token == "VERIFIED"
 
 
 class ChatBody(BaseModel):
@@ -166,8 +209,26 @@ async def chat(body: ChatBody):
     session = SQLiteSession(sid, db_path=str(db_path))
     model = OpenAIChatCompletionsModel(model=st.openrouter_model, openai_client=openrouter_client(st))
 
+    vstore = VerificationStore(_verification_store_path(st))
+    verified_before = vstore.is_verified(sid)
+
+    if verified_before:
+        agent_name = AGENT_NAME
+        instructions = support_instructions_verified()
+        trace_span = TRACE_SUPPORT_SPAN
+    else:
+        agent_name = VERIFICATION_GUARD_NAME
+        instructions = verification_guard_instructions()
+        trace_span = TRACE_VERIFICATION_GUARD_SPAN
+
     t0 = time.perf_counter()
-    log.info("chat start session=%s message_len=%d", sid[:8], len(msg))
+    log.info(
+        "chat start session=%s message_len=%d verified_before=%s agent=%s",
+        sid[:8],
+        len(msg),
+        verified_before,
+        agent_name,
+    )
     try:
         async with MCPServerStreamableHttp(
             params=_streamable_params(mcp_url),
@@ -175,12 +236,12 @@ async def chat(body: ChatBody):
             cache_tools_list=True,
         ) as mcp:
             agent = Agent(
-                name=AGENT_NAME,
-                instructions=SUPPORT_AGENT,
+                name=agent_name,
+                instructions=instructions,
                 model=model,
                 mcp_servers=[mcp],
             )
-            with trace(TRACE_SPAN_NAME):
+            with trace(trace_span):
                 result = await Runner.run(
                     agent,
                     input=msg,
@@ -192,7 +253,28 @@ async def chat(body: ChatBody):
             text = ""
         elif not isinstance(text, str):
             text = str(text)
-        return {"reply": text.strip()}
+        reply = text.strip()
+
+        verified_after = verified_before
+        if not verified_before and reply:
+            outcome = verification_tool_outcome(result)
+            if outcome == "verified":
+                vstore.set_verified(sid)
+                verified_after = True
+                log.info("session verified via MCP tool output session=%s", sid[:8])
+            elif outcome == "unknown":
+                if await _fallback_verification_classifier(
+                    user_message=msg,
+                    assistant_reply=reply,
+                    model=model,
+                ):
+                    vstore.set_verified(sid)
+                    verified_after = True
+                    log.info("session verified via fallback classifier session=%s", sid[:8])
+            elif outcome == "failed":
+                log.info("PIN verification failed this turn session=%s", sid[:8])
+
+        return {"reply": reply, "verified": verified_after}
     except MaxTurnsExceeded as e:
         log.warning("chat max_turns session=%s err=%s", sid[:8], e)
         raise HTTPException(status_code=504, detail="Too many steps—try a shorter question.") from e
@@ -216,5 +298,6 @@ async def reset_session(body: ResetBody):
     sid = _validate_session_id(body.session_id)
     session = SQLiteSession(sid, db_path=str(_session_store_path(st)))
     await session.clear_session()
+    VerificationStore(_verification_store_path(st)).clear(sid)
     log.info("session reset session=%s", sid[:8])
     return {"ok": True}
