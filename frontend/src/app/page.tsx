@@ -19,15 +19,11 @@ function getOrCreateSessionId(): string {
   return id;
 }
 
-const OPENING_ASSISTANT =
-  "Hello — I'm your support assistant. I'm here to help with products and orders. First I need to verify your account: please send your email and the PIN on file.";
-
 export default function Page() {
-  const [messages, setMessages] = useState<Msg[]>([{ role: "assistant", content: OPENING_ASSISTANT }]);
+  const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** null = still checking; true/false = health result */
   const [serviceActive, setServiceActive] = useState<boolean | null>(null);
   const [accountVerified, setAccountVerified] = useState(false);
   const [sessionId, setSessionId] = useState("");
@@ -99,64 +95,100 @@ export default function Page() {
     sessionStorage.setItem("support_chat_session_id", id);
     setSessionId(id);
     setAccountVerified(false);
-    setMessages([{ role: "assistant", content: OPENING_ASSISTANT }]);
+    setMessages([]);
   }
 
   const statusLabel =
-    !apiBase ? "Not connected" : serviceActive === null ? "Connecting…" : serviceActive ? "Active" : "Unavailable";
+    !apiBase ? "Offline" : serviceActive === null ? "Connecting…" : serviceActive ? "Connected" : "Unavailable";
+
+  const showEmpty = messages.length === 0 && !loading;
 
   return (
-    <div className="layout">
-      <header className="header">
-        <p className="header-kicker">Customer support</p>
-        <h1 className="header-title">Support</h1>
-        <p className="header-sub">Help with products, orders, and account.</p>
-        <div className="meta">
-          <span
-            className={`pill ${
-              serviceActive ? "pill-ok" : serviceActive === false || !apiBase ? "pill-off" : ""
-            }`}
-            aria-live="polite"
-          >
-            {statusLabel}
-          </span>
-          {accountVerified && apiBase && (
-            <span className="pill pill-ok" aria-live="polite">
-              Account verified
-            </span>
-          )}
+    <div className="app-shell">
+      <header className="brand-header">
+        <div className="brand-header-inner">
+          <div className="brand-lockup">
+            <span className="brand-mark" aria-hidden />
+            <div>
+              <p className="brand-name">Meridian Electronics</p>
+              <p className="brand-tagline">Support</p>
+            </div>
+          </div>
+          <div className="brand-meta">
+            <span
+              className={`status-dot ${serviceActive ? "status-dot--ok" : serviceActive === false || !apiBase ? "status-dot--bad" : ""}`}
+              aria-hidden
+            />
+            <span className="status-text">{statusLabel}</span>
+            {accountVerified && apiBase && (
+              <span className="badge-verified" aria-live="polite">
+                Verified
+              </span>
+            )}
+          </div>
         </div>
       </header>
 
       {!apiBase && (
-        <p className="empty-hint">Build with NEXT_PUBLIC_API_URL pointing at the API (CI sets this from App Runner).</p>
+        <p className="config-banner">Set <code>NEXT_PUBLIC_API_URL</code> to your API URL, then rebuild.</p>
       )}
 
-      <div className="chat-scroll">
-        {!messages.some((m) => m.role === "user") && apiBase && (
-          <p className="empty-hint">Reply with your email and PIN to continue, or ask a question after you are verified.</p>
-        )}
-        {messages.map((msg, i) => (
-          <div key={i} className={`bubble ${msg.role === "user" ? "bubble-user" : "bubble-assistant"}`}>
-            {msg.role === "assistant" && <div className="bubble-label">Assistant</div>}
-            {msg.role === "assistant" ? <ChatMarkdown content={msg.content} /> : <span className="bubble-text-plain">{msg.content}</span>}
-          </div>
-        ))}
-        {loading && (
-          <div className="bubble bubble-assistant">
-            <div className="bubble-label">Assistant</div>
-            <span className="bubble-text-plain">…</span>
-          </div>
-        )}
-        <div ref={bottomRef} />
-      </div>
+      <main className="chat-main">
+        <div className="chat-scroll">
+          {showEmpty && (
+            <div className="empty-chat">
+              <h2 className="empty-title">How can we help?</h2>
+              <p className="empty-body">
+                Send a message to connect with Meridian Electronics support. You’ll be asked to verify your account
+                before we look up orders or inventory.
+              </p>
+            </div>
+          )}
+          {messages.map((msg, i) => (
+            <div
+              key={i}
+              className={`msg-row ${msg.role === "user" ? "msg-row--user" : "msg-row--assistant"}`}
+            >
+              {msg.role === "assistant" && <span className="msg-avatar" aria-hidden />}
+              <div className={`bubble ${msg.role === "user" ? "bubble-user" : "bubble-assistant"}`}>
+                {msg.role === "assistant" && (
+                  <div className="bubble-head">
+                    <span className="bubble-name">Meridian</span>
+                  </div>
+                )}
+                {msg.role === "assistant" ? (
+                  <ChatMarkdown content={msg.content} />
+                ) : (
+                  <span className="bubble-text-plain">{msg.content}</span>
+                )}
+              </div>
+            </div>
+          ))}
+          {loading && (
+            <div className="msg-row msg-row--assistant">
+              <span className="msg-avatar" aria-hidden />
+              <div className="bubble bubble-assistant bubble--typing">
+                <div className="bubble-head">
+                  <span className="bubble-name">Meridian</span>
+                </div>
+                <span className="typing" aria-label="Assistant is typing">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                </span>
+              </div>
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
+      </main>
 
       {error && <div className="alert">{error}</div>}
 
-      <div className="composer-wrap">
-        <div className="composer">
+      <footer className="composer-dock">
+        <div className="composer-card">
           <textarea
-            rows={2}
+            rows={1}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -165,17 +197,18 @@ export default function Page() {
                 void send();
               }
             }}
-            placeholder={apiBase ? "Message…" : "API URL not configured"}
+            placeholder={apiBase ? "Message Meridian Electronics…" : "API URL not configured"}
             disabled={!apiBase || loading}
+            className="composer-input"
           />
           <button type="button" className="btn-send" disabled={!apiBase || loading || !input.trim()} onClick={() => void send()}>
             Send
           </button>
         </div>
-        <button type="button" className="btn-text" onClick={() => void resetChat()}>
-          Clear conversation
+        <button type="button" className="btn-secondary" onClick={() => void resetChat()}>
+          New conversation
         </button>
-      </div>
+      </footer>
     </div>
   );
 }
