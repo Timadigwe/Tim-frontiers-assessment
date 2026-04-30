@@ -1,0 +1,10 @@
+.env
+.terraform/
+*.tfstate
+*.tfstate.*
+__pycache__/
+.venv/
+node_modules/
+frontend/out/
+frontend/.next/
+dist/

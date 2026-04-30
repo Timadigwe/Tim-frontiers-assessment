@@ -1,0 +1,55 @@
+name: deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: tim-frontiers-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+      TF_VAR_create_app_runner: "true"
+      TF_VAR_openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Secrets
+        env:
+          _AWS_ROLE: ${{ secrets.AWS_ROLE_ARN }}
+          _OR: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$_AWS_ROLE" ]; then echo "Add AWS_ROLE_ARN" >&2; exit 1; fi
+          if [ -z "$_OR" ]; then echo "Add OPENROUTER_API_KEY" >&2; exit 1; fi
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: tim-frontiers-${{ github.run_id }}
+          aws-region: us-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+          terraform_wrapper: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Deploy
+        run: chmod +x scripts/deploy.sh && ./scripts/deploy.sh dev

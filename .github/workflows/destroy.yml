@@ -1,0 +1,37 @@
+name: destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type destroy to confirm"
+        required: true
+        default: ""
+        type: string
+
+jobs:
+  destroy:
+    if: inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: us-west-2
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: tim-frontiers-destroy-${{ github.run_id }}
+          aws-region: us-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.0"
+          terraform_wrapper: false
+
+      - run: chmod +x scripts/destroy.sh && ./scripts/destroy.sh dev
