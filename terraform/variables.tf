@@ -34,6 +34,13 @@ variable "openrouter_model" {
   default = "openai/gpt-4o-mini"
 }
 
+variable "openai_api_key" {
+  type        = string
+  sensitive   = true
+  description = "Optional OpenAI API key for Agents SDK trace export (Traces dashboard). LLM still uses OpenRouter."
+  default     = ""
+}
+
 variable "mcp_server_url" {
   type        = string
   sensitive   = true

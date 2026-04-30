@@ -21,6 +21,9 @@ fi
 if [[ -n "${MCP_SERVER_URL:-}" && -z "${TF_VAR_mcp_server_url:-}" ]]; then
   export TF_VAR_mcp_server_url="$MCP_SERVER_URL"
 fi
+if [[ -n "${OPENAI_API_KEY:-}" && -z "${TF_VAR_openai_api_key:-}" ]]; then
+  export TF_VAR_openai_api_key="$OPENAI_API_KEY"
+fi
 
 if [[ -z "${TF_STATE_BUCKET:-}" && -n "${GITHUB_ACTIONS:-}" ]]; then
   _acct=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)

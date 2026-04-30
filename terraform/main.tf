@@ -81,6 +81,9 @@ resource "aws_apprunner_service" "api" {
           },
           var.openrouter_api_key != "" ? {
             OPENROUTER_API_KEY = var.openrouter_api_key
+          } : {},
+          var.openai_api_key != "" ? {
+            OPENAI_API_KEY = var.openai_api_key
           } : {}
         )
       }

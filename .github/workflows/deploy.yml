@@ -22,6 +22,7 @@ jobs:
       TF_VAR_create_app_runner: "true"
       TF_VAR_openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
       TF_VAR_mcp_server_url: ${{ secrets.MCP_SERVER_URL }}
+      TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 

@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled, trace
+from agents import (
+    Agent,
+    OpenAIChatCompletionsModel,
+    Runner,
+    set_tracing_disabled,
+    set_tracing_export_api_key,
+    trace,
+)
 from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.memory import SQLiteSession
 from agents.mcp import MCPServerStreamableHttp
@@ -27,10 +38,42 @@ from instructions import SUPPORT_AGENT
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+# Safe default: OpenRouter has no OpenAI key unless we set tracing export separately.
 set_tracing_disabled(True)
 
-logging.basicConfig(level=logging.INFO)
+
+def _setup_logging() -> None:
+    level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)-5s | %(name)s | %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+
+_setup_logging()
 log = logging.getLogger(__name__)
+
+
+def _configure_tracing(st: Settings) -> None:
+    key = (st.openai_api_key or "").strip()
+    if key:
+        set_tracing_export_api_key(key)
+        set_tracing_disabled(False)
+        log.info("OpenAI Agents tracing export enabled (Traces dashboard)")
+    else:
+        set_tracing_disabled(True)
+        log.info(
+            "OpenAI Agents tracing export disabled; set OPENAI_API_KEY to export traces "
+        )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _configure_tracing(get_settings())
+    yield
 
 
 def openrouter_client(settings: Settings) -> AsyncOpenAI:
@@ -83,7 +126,7 @@ class ResetBody(BaseModel):
     session_id: str = Field(..., min_length=SESSION_ID_MIN_LEN, max_length=SESSION_ID_MAX_LEN)
 
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -104,6 +147,7 @@ def api_config():
         "model": st.openrouter_model,
         "llm_configured": bool(st.openrouter_api_key.strip()),
         "mcp_configured": bool(_norm_mcp(st.mcp_server_url)),
+        "tracing_export_configured": bool(st.openai_api_key.strip()),
     }
 
 
@@ -121,6 +165,9 @@ async def chat(body: ChatBody):
     db_path = _session_store_path(st)
     session = SQLiteSession(sid, db_path=str(db_path))
     model = OpenAIChatCompletionsModel(model=st.openrouter_model, openai_client=openrouter_client(st))
+
+    t0 = time.perf_counter()
+    log.info("chat start session=%s message_len=%d", sid[:8], len(msg))
     try:
         async with MCPServerStreamableHttp(
             params=_streamable_params(mcp_url),
@@ -147,14 +194,20 @@ async def chat(body: ChatBody):
             text = str(text)
         return {"reply": text.strip()}
     except MaxTurnsExceeded as e:
-        log.warning("max turns: %s", e)
+        log.warning("chat max_turns session=%s err=%s", sid[:8], e)
         raise HTTPException(status_code=504, detail="Too many steps—try a shorter question.") from e
     except AgentsException as e:
-        log.exception("agents")
+        log.warning(
+            "chat agents_error session=%s: %s",
+            sid[:8],
+            getattr(e, "message", str(e))[:500],
+        )
         raise HTTPException(status_code=502, detail=getattr(e, "message", str(e))) from e
     except Exception as e:  # noqa: BLE001
-        log.exception("chat")
+        log.exception("chat unexpected_error session=%s", sid[:8])
         raise HTTPException(status_code=502, detail="Support chat temporarily unavailable.") from e
+    finally:
+        log.info("chat end session=%s duration_ms=%d", sid[:8], int((time.perf_counter() - t0) * 1000))
 
 
 @app.post("/api/session/reset")
@@ -163,4 +216,5 @@ async def reset_session(body: ResetBody):
     sid = _validate_session_id(body.session_id)
     session = SQLiteSession(sid, db_path=str(_session_store_path(st)))
     await session.clear_session()
+    log.info("session reset session=%s", sid[:8])
     return {"ok": True}

@@ -1,5 +1,6 @@
 "use client";
 
+import { newSessionId } from "@/lib/sessionId";
 import { useEffect, useRef, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
@@ -11,7 +12,7 @@ function getOrCreateSessionId(): string {
   const k = "support_chat_session_id";
   let id = sessionStorage.getItem(k);
   if (!id) {
-    id = crypto.randomUUID();
+    id = newSessionId();
     sessionStorage.setItem(k, id);
   }
   return id;
@@ -86,7 +87,7 @@ export default function Page() {
     } catch {
       /* ignore */
     }
-    const id = crypto.randomUUID();
+    const id = newSessionId();
     sessionStorage.setItem("support_chat_session_id", id);
     setSessionId(id);
     setMessages([]);

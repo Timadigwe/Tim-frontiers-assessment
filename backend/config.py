@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     openrouter_referer: str = "https://example.com"
     openrouter_title: str = "Support Assistant"
     session_store_dir: str = "/tmp/chat-sessions"
+    # Optional: same key OpenAI uses for the Traces dashboard (LLM still goes through OpenRouter).
+    openai_api_key: str = ""
 
 
 @lru_cache
