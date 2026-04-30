@@ -1,39 +1,36 @@
 from __future__ import annotations
 
-import json
 import logging
-from functools import lru_cache
-from typing import Any, Literal
+from pathlib import Path
 
-from agents import set_tracing_disabled
-from agents.exceptions import UserError
-from agents.mcp import MCPServerSse, MCPServerStreamableHttp
+from agents import Agent, OpenAIChatCompletionsModel, Runner, set_tracing_disabled, trace
+from agents.exceptions import AgentsException, MaxTurnsExceeded
+from agents.memory import SQLiteSession
+from agents.mcp import MCPServerStreamableHttp
+from config import Settings, get_settings
+from constants import (
+    AGENT_NAME,
+    CHAT_MESSAGE_MAX_LEN,
+    MCP_SSE_READ_TIMEOUT_S,
+    MCP_TIMEOUT_S,
+    MAX_AGENT_TURNS,
+    OPENROUTER_BASE_URL,
+    SESSION_DB_FILENAME,
+    SESSION_ID_MAX_LEN,
+    SESSION_ID_MIN_LEN,
+    TRACE_SPAN_NAME,
+    UUID_V1_TO_V5_RE,
+)
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from instructions import SUPPORT_AGENT
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 set_tracing_disabled(True)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
-
-MCP_TIMEOUT_S = 120.0
-
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    openrouter_api_key: str = Field(default="", description="OpenRouter API key")
-    openrouter_model: str = "openai/gpt-4o"
-    openrouter_referer: str = "https://localhost"
-    openrouter_title: str = "Tim Frontiers"
-
-
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
 
 
 def openrouter_client(settings: Settings) -> AsyncOpenAI:
@@ -43,164 +40,47 @@ def openrouter_client(settings: Settings) -> AsyncOpenAI:
     if settings.openrouter_title:
         headers["X-Title"] = settings.openrouter_title
     return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url=OPENROUTER_BASE_URL,
         api_key=settings.openrouter_api_key,
         default_headers=headers or None,
     )
 
 
 def _norm_mcp(u: str) -> str:
-    u = u.rstrip("/")
+    u = (u or "").strip().rstrip("/")
+    if not u:
+        return ""
     return u if u.endswith("/mcp") else f"{u}/mcp"
 
 
-def _streamable_params(url: str, hdrs: dict[str, str]) -> dict[str, Any]:
-    p: dict[str, Any] = {
-        "url": url,
-        "timeout": MCP_TIMEOUT_S,
-        "sse_read_timeout": 300.0,
-    }
-    if hdrs:
-        p["headers"] = hdrs
-    return p
-
-
-def _sse_params(url: str, hdrs: dict[str, str]) -> dict[str, Any]:
-    p: dict[str, Any] = {
-        "url": url,
-        "timeout": MCP_TIMEOUT_S,
-        "sse_read_timeout": 300.0,
-    }
-    if hdrs:
-        p["headers"] = hdrs
-    return p
-
-
-def _dump_tool(t: Any) -> dict[str, Any]:
-    if hasattr(t, "model_dump"):
-        return t.model_dump(mode="json")
-    return {"name": getattr(t, "name", str(t))}
-
-
-def _dump_resource(r: Any) -> dict[str, Any]:
-    if hasattr(r, "model_dump"):
-        return r.model_dump(mode="json")
-    return {"uri": str(getattr(r, "uri", r))}
-
-
-async def _listing_from_server(mcp: Any, transport: str, url_used: str) -> dict[str, Any]:
-    tools_raw = await mcp.list_tools()
-    tools = [_dump_tool(t) for t in tools_raw]
-    resources: list[dict[str, Any]] = []
-    try:
-        lr = await mcp.list_resources()
-        resources = [_dump_resource(r) for r in lr.resources]
-    except Exception as e:  # noqa: BLE001
-        log.debug("list_resources: %s", e)
+def _streamable_params(url: str) -> dict:
     return {
-        "tools": tools,
-        "resources": resources,
-        "transport": transport,
-        "mcp_url_used": url_used,
+        "url": url,
+        "timeout": MCP_TIMEOUT_S,
+        "sse_read_timeout": MCP_SSE_READ_TIMEOUT_S,
     }
 
 
-async def _inspect_streamable(url: str, hdrs: dict[str, str]) -> dict[str, Any]:
-    async with MCPServerStreamableHttp(
-        params=_streamable_params(url, hdrs),
-        client_session_timeout_seconds=MCP_TIMEOUT_S,
-        cache_tools_list=False,
-    ) as mcp:
-        return await _listing_from_server(mcp, "streamable_http", url)
+def _session_store_path(st: Settings) -> Path:
+    root = Path(st.session_store_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    return root / SESSION_DB_FILENAME
 
 
-async def _inspect_sse(url: str, hdrs: dict[str, str]) -> dict[str, Any]:
-    async with MCPServerSse(
-        params=_sse_params(url, hdrs),
-        client_session_timeout_seconds=MCP_TIMEOUT_S,
-        cache_tools_list=False,
-    ) as mcp:
-        return await _listing_from_server(mcp, "sse", url)
+def _validate_session_id(session_id: str) -> str:
+    s = session_id.strip()
+    if not UUID_V1_TO_V5_RE.match(s):
+        raise HTTPException(status_code=400, detail="session_id must be a UUID")
+    return s.lower()
 
 
-async def _try_streamable(url: str, hdrs: dict[str, str]) -> dict[str, Any] | None:
-    try:
-        return await _inspect_streamable(url, hdrs)
-    except UserError as e:
-        log.info("streamable_http %s: %s", url, e.message)
-        return None
-    except Exception as e:  # noqa: BLE001
-        log.info("streamable_http %s: %s", url, e)
-        return None
+class ChatBody(BaseModel):
+    session_id: str = Field(..., min_length=SESSION_ID_MIN_LEN, max_length=SESSION_ID_MAX_LEN)
+    message: str = Field(..., min_length=1, max_length=CHAT_MESSAGE_MAX_LEN)
 
 
-async def _try_sse(url: str, hdrs: dict[str, str]) -> dict[str, Any] | None:
-    try:
-        return await _inspect_sse(url, hdrs)
-    except UserError as e:
-        log.info("sse %s: %s", url, e.message)
-        return None
-    except Exception as e:  # noqa: BLE001
-        log.info("sse %s: %s", url, e)
-        return None
-
-
-async def run_inspect(
-    mcp_url: str,
-    transport: Literal["auto", "sse", "streamable_http"] = "auto",
-    headers: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    url = mcp_url.strip()
-    if not url:
-        raise ValueError("mcp_url is empty")
-    hdrs = dict(headers) if headers else {}
-
-    if transport == "streamable_http":
-        su = _norm_mcp(url)
-        r = await _try_streamable(su, hdrs)
-        if r:
-            return r
-        raise RuntimeError(f"streamable_http failed: {su}")
-
-    if transport == "sse":
-        cands = [url]
-        if not url.rstrip("/").endswith("sse"):
-            cands.append(f"{url.rstrip('/')}/sse")
-        seen: set[str] = set()
-        for u in cands:
-            if u in seen:
-                continue
-            seen.add(u)
-            r = await _try_sse(u, hdrs)
-            if r:
-                return r
-        raise RuntimeError(f"sse failed: {cands!r}")
-
-    su = _norm_mcp(url)
-    r = await _try_streamable(su, hdrs)
-    if r:
-        return r
-    for u in [url] + ([] if url.rstrip("/").endswith("sse") else [f"{url.rstrip('/')}/sse"]):
-        r = await _try_sse(u, hdrs)
-        if r:
-            return r
-    raise RuntimeError("auto: streamable_http and sse both failed")
-
-
-async def summarize(data: dict[str, Any], s: Settings) -> str:
-    if not (s.openrouter_api_key or "").strip():
-        return ""
-    client = openrouter_client(s)
-    payload = json.dumps(data, indent=2)[:14_000]
-    msg = (
-        "Briefly summarize (3-6 sentences) what this MCP server exposes for a developer.\n\n" + payload
-    )
-    resp = await client.chat.completions.create(
-        model=s.openrouter_model,
-        messages=[{"role": "user", "content": msg}],
-        max_tokens=600,
-    )
-    return (resp.choices[0].message.content or "").strip()
+class ResetBody(BaseModel):
+    session_id: str = Field(..., min_length=SESSION_ID_MIN_LEN, max_length=SESSION_ID_MAX_LEN)
 
 
 app = FastAPI()
@@ -217,44 +97,70 @@ def health():
     return {"ok": True}
 
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "tim-frontiers-assessment"}
-
-
-class McpBody(BaseModel):
-    mcp_url: str = Field(..., min_length=1)
-    transport: Literal["auto", "sse", "streamable_http"] = "auto"
-    headers: dict[str, str] = Field(default_factory=dict)
-
-
-@app.post("/api/mcp/inspect")
-async def mcp_inspect(body: McpBody):
-    st = get_settings()
-    try:
-        listing = await run_inspect(body.mcp_url, body.transport, body.headers)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
-    summary = ""
-    if (st.openrouter_api_key or "").strip():
-        try:
-            summary = await summarize(listing, st)
-        except Exception as e:  # noqa: BLE001
-            log.exception("openrouter")
-            summary = f"(failed: {e!s})"
-    return {
-        **listing,
-        "openrouter_summary": summary,
-        "openrouter_configured": bool((st.openrouter_api_key or "").strip()),
-    }
-
-
 @app.get("/api/config")
 def api_config():
-    s = get_settings()
+    st = get_settings()
     return {
-        "openrouter_configured": bool((s.openrouter_api_key or "").strip()),
-        "openrouter_model": s.openrouter_model,
+        "model": st.openrouter_model,
+        "llm_configured": bool(st.openrouter_api_key.strip()),
+        "mcp_configured": bool(_norm_mcp(st.mcp_server_url)),
     }
+
+
+@app.post("/api/chat")
+async def chat(body: ChatBody):
+    st = get_settings()
+    if not st.openrouter_api_key.strip():
+        raise HTTPException(status_code=503, detail="OPENROUTER_API_KEY is not set")
+    mcp_url = _norm_mcp(st.mcp_server_url)
+    if not mcp_url:
+        raise HTTPException(status_code=503, detail="MCP_SERVER_URL is not set")
+
+    sid = _validate_session_id(body.session_id)
+    msg = body.message.strip()
+    db_path = _session_store_path(st)
+    session = SQLiteSession(sid, db_path=str(db_path))
+    model = OpenAIChatCompletionsModel(model=st.openrouter_model, openai_client=openrouter_client(st))
+    try:
+        async with MCPServerStreamableHttp(
+            params=_streamable_params(mcp_url),
+            client_session_timeout_seconds=MCP_TIMEOUT_S,
+            cache_tools_list=True,
+        ) as mcp:
+            agent = Agent(
+                name=AGENT_NAME,
+                instructions=SUPPORT_AGENT,
+                model=model,
+                mcp_servers=[mcp],
+            )
+            with trace(TRACE_SPAN_NAME):
+                result = await Runner.run(
+                    agent,
+                    input=msg,
+                    session=session,
+                    max_turns=MAX_AGENT_TURNS,
+                )
+        text = result.final_output
+        if text is None:
+            text = ""
+        elif not isinstance(text, str):
+            text = str(text)
+        return {"reply": text.strip()}
+    except MaxTurnsExceeded as e:
+        log.warning("max turns: %s", e)
+        raise HTTPException(status_code=504, detail="Too many steps—try a shorter question.") from e
+    except AgentsException as e:
+        log.exception("agents")
+        raise HTTPException(status_code=502, detail=getattr(e, "message", str(e))) from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("chat")
+        raise HTTPException(status_code=502, detail="Support chat temporarily unavailable.") from e
+
+
+@app.post("/api/session/reset")
+async def reset_session(body: ResetBody):
+    st = get_settings()
+    sid = _validate_session_id(body.session_id)
+    session = SQLiteSession(sid, db_path=str(_session_store_path(st)))
+    await session.clear_session()
+    return {"ok": True}

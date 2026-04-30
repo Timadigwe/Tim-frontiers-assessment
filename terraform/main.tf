@@ -74,10 +74,13 @@ resource "aws_apprunner_service" "api" {
       image_configuration {
         port = "8000"
         runtime_environment_variables = merge(
-          { AWS_REGION = var.aws_region },
+          {
+            AWS_REGION       = var.aws_region
+            MCP_SERVER_URL   = var.mcp_server_url
+            OPENROUTER_MODEL = var.openrouter_model
+          },
           var.openrouter_api_key != "" ? {
             OPENROUTER_API_KEY = var.openrouter_api_key
-            OPENROUTER_MODEL   = var.openrouter_model
           } : {}
         )
       }

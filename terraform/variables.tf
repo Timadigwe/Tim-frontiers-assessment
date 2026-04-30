@@ -31,5 +31,12 @@ variable "openrouter_api_key" {
 
 variable "openrouter_model" {
   type    = string
-  default = "openai/gpt-4o"
+  default = "openai/gpt-4o-mini"
+}
+
+variable "mcp_server_url" {
+  type        = string
+  sensitive   = true
+  description = "MCP server URL (streamable HTTP; usually ends with /mcp). Override in CI via MCP_SERVER_URL secret."
+  default     = "https://order-mcp-74afyau24q-uc.a.run.app/mcp"
 }

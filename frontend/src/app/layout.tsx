@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Tim Frontiers — MCP Inspector",
-  description: "Inspect remote MCP servers and optional OpenRouter summaries.",
+  title: "Support",
+  description: "Customer support chat.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

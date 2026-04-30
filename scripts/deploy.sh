@@ -18,6 +18,9 @@ fi
 if [[ -n "${OPENROUTER_MODEL:-}" && -z "${TF_VAR_openrouter_model:-}" ]]; then
   export TF_VAR_openrouter_model="$OPENROUTER_MODEL"
 fi
+if [[ -n "${MCP_SERVER_URL:-}" && -z "${TF_VAR_mcp_server_url:-}" ]]; then
+  export TF_VAR_mcp_server_url="$MCP_SERVER_URL"
+fi
 
 if [[ -z "${TF_STATE_BUCKET:-}" && -n "${GITHUB_ACTIONS:-}" ]]; then
   _acct=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)

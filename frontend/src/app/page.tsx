@@ -1,187 +1,168 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const apiBase = process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ?? "";
 
-type Transport = "auto" | "sse" | "streamable_http";
+type Msg = { role: "user" | "assistant"; content: string };
+
+function getOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "";
+  const k = "support_chat_session_id";
+  let id = sessionStorage.getItem(k);
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem(k, id);
+  }
+  return id;
+}
 
 export default function Page() {
-  const [mcpUrl, setMcpUrl] = useState("");
-  const [headerJson, setHeaderJson] = useState("");
-  const [transport, setTransport] = useState<Transport>("auto");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
-  const [cfg, setCfg] = useState<{ openrouter_configured?: boolean; openrouter_model?: string } | null>(null);
+  /** null = still checking; true/false = health result */
+  const [serviceActive, setServiceActive] = useState<boolean | null>(null);
+  const [sessionId, setSessionId] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!apiBase) return;
-    fetch(`${apiBase}/api/config`)
-      .then((r) => r.json())
-      .then(setCfg)
-      .catch(() => setCfg({}));
+    setSessionId(getOrCreateSessionId());
   }, []);
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  useEffect(() => {
     if (!apiBase) {
-      setError("Build the app with NEXT_PUBLIC_API_URL set to your App Runner API URL (CI does this automatically).");
+      setServiceActive(null);
       return;
     }
-    setLoading(true);
+    setServiceActive(null);
+    fetch(`${apiBase}/api/health`)
+      .then((r) => setServiceActive(r.ok))
+      .catch(() => setServiceActive(false));
+  }, [apiBase]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  async function send() {
+    const text = input.trim();
+    if (!text || !apiBase || !sessionId) return;
+    setInput("");
     setError(null);
-    setResult(null);
-    let extraHeaders: Record<string, string> = {};
-    const raw = headerJson.trim();
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-          throw new Error("Headers must be a JSON object.");
-        }
-        extraHeaders = Object.fromEntries(
-          Object.entries(parsed as Record<string, unknown>).map(([k, v]) => [
-            k,
-            typeof v === "string" ? v : JSON.stringify(v),
-          ]),
-        );
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Invalid headers JSON.");
-        setLoading(false);
-        return;
-      }
-    }
+    setMessages((m) => [...m, { role: "user", content: text }]);
+    setLoading(true);
     try {
-      const res = await fetch(`${apiBase}/api/mcp/inspect`, {
+      const res = await fetch(`${apiBase}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mcp_url: mcpUrl.trim(),
-          transport,
-          headers: extraHeaders,
-        }),
+        body: JSON.stringify({ session_id: sessionId, message: text }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data);
         throw new Error(detail || res.statusText);
       }
-      setResult(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const reply = typeof data?.reply === "string" ? data.reply : "";
+      setMessages((m) => [...m, { role: "assistant", content: reply || "(No reply)" }]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setMessages((m) => m.slice(0, -1));
     } finally {
       setLoading(false);
     }
   }
 
-  const orOn = Boolean(cfg?.openrouter_configured);
+  async function resetChat() {
+    if (!apiBase || !sessionId) return;
+    setError(null);
+    try {
+      await fetch(`${apiBase}/api/session/reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+    } catch {
+      /* ignore */
+    }
+    const id = crypto.randomUUID();
+    sessionStorage.setItem("support_chat_session_id", id);
+    setSessionId(id);
+    setMessages([]);
+  }
+
+  const statusLabel =
+    !apiBase ? "Not connected" : serviceActive === null ? "Connecting…" : serviceActive ? "Active" : "Unavailable";
 
   return (
-    <div className="shell">
-      <header className="hero">
-        <p className="hero-eyebrow">MCP</p>
-        <h1 className="hero-title">Server inspector</h1>
-        <p className="hero-desc">
-          Connect to a streamable HTTP or SSE endpoint, list tools and resources, and optionally get
-          a short OpenRouter summary.
-        </p>
+    <div className="layout">
+      <header className="header">
+        <p className="header-kicker">Customer support</p>
+        <h1 className="header-title">Support</h1>
+        <p className="header-sub">Help with products, orders, and account.</p>
+        <div className="meta">
+          <span
+            className={`pill ${
+              serviceActive ? "pill-ok" : serviceActive === false || !apiBase ? "pill-off" : ""
+            }`}
+            aria-live="polite"
+          >
+            {statusLabel}
+          </span>
+        </div>
       </header>
 
-      <div className="card">
-        <div className="meta-row">
-          <span
-            className={`badge ${orOn ? "badge-on" : ""}`}
-            title={orOn ? "OpenRouter is configured on the API" : "Add OPENROUTER_API_KEY to the backend"}
-          >
-            <span className="badge-dot" aria-hidden />
-            OpenRouter {orOn ? "on" : "off"}
-            {orOn && cfg?.openrouter_model ? ` · ${cfg.openrouter_model}` : ""}
-          </span>
-          <span className="badge badge-code" title="API base URL">
-            {apiBase || "No API URL (set at build time)"}
-          </span>
-        </div>
+      {!apiBase && (
+        <p className="empty-hint">Build with NEXT_PUBLIC_API_URL pointing at the API (CI sets this from App Runner).</p>
+      )}
 
-        <form onSubmit={onSubmit}>
-          <div className="field">
-            <label className="field-label" htmlFor="mcp-url">
-              MCP URL
-            </label>
-            <input
-              id="mcp-url"
-              className="input"
-              type="url"
-              required
-              value={mcpUrl}
-              onChange={(e) => setMcpUrl(e.target.value)}
-              placeholder="https://example.com/mcp"
-              autoComplete="url"
-            />
-            <p className="field-hint">Streamable HTTP is usually the host with path <code>/mcp</code>.</p>
+      <div className="chat-scroll">
+        {messages.length === 0 && apiBase && (
+          <p className="empty-hint">
+            Ask about stock, search products, verify with email + PIN for orders, or start an order.
+          </p>
+        )}
+        {messages.map((msg, i) => (
+          <div key={i} className={`bubble ${msg.role === "user" ? "bubble-user" : "bubble-assistant"}`}>
+            {msg.role === "assistant" && <div className="bubble-label">Assistant</div>}
+            {msg.content}
           </div>
-
-          <div className="field">
-            <label className="field-label" htmlFor="mcp-headers">
-              HTTP headers (JSON, optional)
-            </label>
-            <textarea
-              id="mcp-headers"
-              className="textarea"
-              value={headerJson}
-              onChange={(e) => setHeaderJson(e.target.value)}
-              placeholder='{"x-player-token": "YourName"}'
-              rows={3}
-              spellCheck={false}
-            />
-            <p className="field-hint">Required by some servers (e.g. player token).</p>
+        ))}
+        {loading && (
+          <div className="bubble bubble-assistant">
+            <div className="bubble-label">Assistant</div>
+            …
           </div>
-
-          <div className="field">
-            <label className="field-label" htmlFor="mcp-transport">
-              Transport
-            </label>
-            <select
-              id="mcp-transport"
-              className="select"
-              value={transport}
-              onChange={(e) => setTransport(e.target.value as Transport)}
-            >
-              <option value="auto">Auto (streamable HTTP, then SSE)</option>
-              <option value="streamable_http">Streamable HTTP</option>
-              <option value="sse">SSE</option>
-            </select>
-          </div>
-
-          <button type="submit" className="btn" disabled={loading}>
-            {loading ? (
-              <>
-                <span className="btn-spinner" aria-hidden />
-                Connecting…
-              </>
-            ) : (
-              "Run inspection"
-            )}
-          </button>
-        </form>
+        )}
+        <div ref={bottomRef} />
       </div>
 
-      {error && <div className="alert-error">{error}</div>}
+      {error && <div className="alert">{error}</div>}
 
-      {result && (
-        <div className="results">
-          {typeof result.openrouter_summary === "string" && result.openrouter_summary && (
-            <section>
-              <h2 className="section-title">Summary</h2>
-              <div className="summary-card">{result.openrouter_summary}</div>
-            </section>
-          )}
-          <section>
-            <h2 className="section-title">JSON</h2>
-            <pre className="pre-json">{JSON.stringify(result, null, 2)}</pre>
-          </section>
+      <div className="composer-wrap">
+        <div className="composer">
+          <textarea
+            rows={2}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            placeholder={apiBase ? "Message…" : "API URL not configured"}
+            disabled={!apiBase || loading}
+          />
+          <button type="button" className="btn-send" disabled={!apiBase || loading || !input.trim()} onClick={() => void send()}>
+            Send
+          </button>
         </div>
-      )}
+        <button type="button" className="btn-text" onClick={() => void resetChat()}>
+          Clear conversation
+        </button>
+      </div>
     </div>
   );
 }

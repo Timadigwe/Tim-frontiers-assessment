@@ -21,6 +21,7 @@ jobs:
       TF_STATE_REGION: ${{ secrets.TF_STATE_REGION }}
       TF_VAR_create_app_runner: "true"
       TF_VAR_openrouter_api_key: ${{ secrets.OPENROUTER_API_KEY }}
+      TF_VAR_mcp_server_url: ${{ secrets.MCP_SERVER_URL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,9 +29,11 @@ jobs:
         env:
           _AWS_ROLE: ${{ secrets.AWS_ROLE_ARN }}
           _OR: ${{ secrets.OPENROUTER_API_KEY }}
+          _MCP: ${{ secrets.MCP_SERVER_URL }}
         run: |
           if [ -z "$_AWS_ROLE" ]; then echo "Add AWS_ROLE_ARN" >&2; exit 1; fi
           if [ -z "$_OR" ]; then echo "Add OPENROUTER_API_KEY" >&2; exit 1; fi
+          if [ -z "$_MCP" ]; then echo "Add MCP_SERVER_URL (MCP server URL, e.g. https://.../mcp)" >&2; exit 1; fi
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
