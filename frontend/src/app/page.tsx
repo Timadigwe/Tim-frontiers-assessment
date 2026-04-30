@@ -139,8 +139,8 @@ export default function Page() {
             <div className="empty-chat">
               <h2 className="empty-title">How can we help?</h2>
               <p className="empty-body">
-                Send a message to connect with Meridian Electronics support. You’ll be asked to verify your account
-                before we look up orders or inventory.
+                Send a message to chat with support. Ask about products, pricing, or your orders and account—we’re
+                here to assist.
               </p>
             </div>
           )}
